@@ -1,0 +1,69 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Smart Campus Assistant — Backend Dockerfile
+# Base:    python:3.11-slim  (Debian-based, ~50 MB compressed)
+# Serves:  FastAPI via Uvicorn on port 8000
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1 (only stage needed for Python): runtime ──────────────────────────
+FROM python:3.11-slim AS runtime
+WORKDIR /app
+
+RUN groupadd --system appgroup && useradd --system --gid appgroup appuser
+# --- OS-level hardening --------------------------------------------------
+# Create a dedicated non-root user so the process never runs as root.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+# --- System dependencies -------------------------------------------------
+# gcc / libpq headers are NOT needed here (pure-Python stack).
+# Only install what SQLite needs (already bundled in the slim image).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        # sqlite3 CLI — optional but useful for debugging inside the container
+        sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Working directory ----------------------------------------------------
+WORKDIR /app
+
+# --- Python dependencies -------------------------------------------------
+# Copy requirements first so this layer is cached unless requirements.txt changes.
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# --- Application source --------------------------------------------------
+# Copy all Python source files (but NOT the frontend directory).
+COPY ai_client.py \
+     ai_prompt.py \
+     classifier.py \
+     database.py \
+     logger.py \
+     main.py \
+     security.py \
+     seed.py \
+     session_manager.py \
+     test_main.py \
+     ./
+
+# --- Runtime directories -------------------------------------------------
+# Create the SQLite data directory and log directory with correct ownership.
+RUN mkdir -p /app/data /app/logs && \
+    chown -R appuser:appgroup /app
+
+# --- Switch to non-root user ---------------------------------------------
+USER appuser
+
+# --- Expose application port ---------------------------------------------
+EXPOSE 8000
+
+# --- Health check --------------------------------------------------------
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+# --- Start command -------------------------------------------------------
+# --host 0.0.0.0  : listen on all interfaces inside the container
+# --port 8000     : matches EXPOSE above
+# --workers 1     : single worker keeps SQLite write-serialization simple;
+#                   increase to 2–4 (with a proper DB) in production
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
